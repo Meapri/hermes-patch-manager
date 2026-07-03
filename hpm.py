@@ -108,7 +108,7 @@ def cmd_heal(args, cfg):
 
 
 def cmd_check(args, cfg):
-    st = engine.check(cfg)
+    st = _full_status(cfg)
     if args.json:
         print(json.dumps(st, indent=2))
     else:
@@ -118,6 +118,7 @@ def cmd_check(args, cfg):
             for c in s.get("components", []):
                 if not c["applied"]:
                     print(f"           - {c['type']} {c.get('target')} NOT applied")
+        print(_llm_line(st))
         print("HEALTHY" if st["healthy"] else f"UNHEALTHY (drift: {st['drift']})")
     return 0 if st["healthy"] else 1
 
@@ -128,13 +129,14 @@ def cmd_status(args, cfg):
 
 
 def cmd_doctor(args, cfg):
-    st = engine.check(cfg)
+    st = _full_status(cfg)
     print("hermes modification-recovery — doctor")
     print(f"  repo   : {cfg['hermes_agent_dir']}")
     print(f"  mods   : {st['enabled_count']} enabled / {st['mod_count']} total")
     for s in st["mods"]:
         mark = {True: "APPLIED", False: "DRIFT", None: "n/a"}[s.get("applied")]
         print(f"    - {s['id']:20} {mark}")
+    print(_llm_line(st))
     print(f"  OVERALL: {'HEALTHY' if st['healthy'] else 'UNHEALTHY'}")
     return 0 if st["healthy"] else 1
 
@@ -142,7 +144,22 @@ def cmd_doctor(args, cfg):
 def _full_status(cfg):
     st = engine.check(cfg)
     st["repo"] = cfg["hermes_agent_dir"]
+    if cfg.get("llm_merge"):
+        try:
+            from recovery.merge_llm import probe
+            st["llm_merge"] = probe(cfg)
+        except Exception as exc:
+            st["llm_merge"] = {"available": None, "detail": f"probe unavailable: {exc}"}
+    else:
+        st["llm_merge"] = {"available": None, "detail": "disabled"}
     return st
+
+
+def _llm_line(st):
+    llm = st.get("llm_merge") or {}
+    label = {True: "available", False: "EXPIRED / UNAVAILABLE — re-auth Antigravity",
+             None: "disabled"}[llm.get("available")]
+    return f"  llm_merge: {label}" + (f"  (model={llm.get('model')})" if llm.get("model") else "")
 
 
 def _load_merger(cfg):

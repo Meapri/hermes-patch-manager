@@ -68,6 +68,49 @@ def make_merger(cfg: dict):
     return merger
 
 
+# --------------------------------------------------------------------------- backend health probe
+_PROBE_CACHE = {"t": 0.0, "result": None}
+
+
+def _do_probe(cfg):
+    """Cheap availability check: load + (refresh-if-expired) Antigravity creds.
+    Confirms the LLM merge backend is usable NOW without spending a completion."""
+    runner = (
+        "import sys;"
+        f"sys.path.insert(0, {_base_dir()!r});"
+        "from recovery._antigravity.antigravity import AntigravityClient;"
+        "from recovery._antigravity.config import Settings;"
+        "cr = AntigravityClient(Settings.from_env())._valid_credentials();"
+        "print('OK' if getattr(cr, 'access_token', '') else 'NOCRED')"
+    )
+    env = dict(os.environ)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    if cfg.get("llm_model"):
+        env["ANTIGRAVITY_PROXY_MODEL"] = cfg["llm_model"]
+    try:
+        r = subprocess.run([cfg["venv_python"], "-c", runner],
+                           capture_output=True, text=True, timeout=60, env=env)
+    except Exception as exc:
+        return {"available": False, "detail": f"probe error: {exc}",
+                "model": cfg.get("llm_model") or "default"}
+    if r.returncode == 0 and "OK" in r.stdout:
+        return {"available": True, "detail": "credentials valid/refreshable",
+                "model": cfg.get("llm_model") or "default"}
+    return {"available": False, "detail": (r.stderr or r.stdout or "no usable credentials").strip()[-200:],
+            "model": cfg.get("llm_model") or "default"}
+
+
+def probe(cfg, ttl=300):
+    """Cached backend probe (avoids spawning a subprocess on every health hit)."""
+    import time
+    now = time.time()
+    if _PROBE_CACHE["result"] is not None and (now - _PROBE_CACHE["t"]) < ttl:
+        return _PROBE_CACHE["result"]
+    res = _do_probe(cfg)
+    _PROBE_CACHE.update(t=now, result=res)
+    return res
+
+
 # --------------------------------------------------------------------------- helpers
 def _git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
