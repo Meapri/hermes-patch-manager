@@ -83,7 +83,7 @@ cat > "$DROPIN_DIR/10-hermes-patch-manager.conf" <<CONF
 # \`hermes update\` rebuilding the venv. ExecStartPre '-' never blocks startup.
 [Service]
 Environment=PYTHONPATH=$DEST/loader
-ExecStartPre=-$DEST/hpm heal
+ExecStartPre=-$DEST/hpm.py heal
 CONF
 
 # --- units -------------------------------------------------------------------
@@ -94,7 +94,7 @@ After=network-online.target
 Wants=network-online.target
 [Service]
 Type=simple
-ExecStart=$DEST/hpm serve
+ExecStart=$DEST/hpm.py serve
 Restart=always
 RestartSec=5
 [Install]
@@ -106,7 +106,7 @@ cat > "$UNIT_DIR/hermes-patch-guard.service" <<UNIT
 Description=hermes-patch-manager drift guard
 [Service]
 Type=oneshot
-ExecStart=$DEST/hpm guard
+ExecStart=$DEST/hpm.py guard
 UNIT
 
 cat > "$UNIT_DIR/hermes-patch-guard.timer" <<UNIT

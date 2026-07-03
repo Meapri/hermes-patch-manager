@@ -28,7 +28,7 @@ import shutil
 import subprocess
 import sys
 
-BASE = os.path.dirname(os.path.abspath(__file__))
+BASE = os.path.dirname(os.path.realpath(__file__))  # realpath: resolve the ~/.local/bin/hpm symlink
 LOADER_DIR = os.path.join(BASE, "loader")
 PATCH_STORE = os.path.join(BASE, "patches")
 REGISTRY_DIR = os.path.join(BASE, "registry.d")
