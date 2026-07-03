@@ -29,18 +29,27 @@ hook per patch, so any number of patches coexist under a single loader.
 | `hermes-patch-guard.timer` → `hpm guard` | a *running* gateway whose patch drifted (e.g. update didn't restart it): restarts it to reattach (if `auto_restart_on_drift`) |
 | `hpm check` / health endpoint | **interface drift** — a Hermes update that changed a hooked API. This can't be auto-fixed (the patch code must be updated), but it is **detected** and surfaced over the tailnet |
 
-## Install (on the Ubuntu box, as root)
+## Install (on the Ubuntu box)
+
+`install.sh` auto-detects whether the Hermes gateway is a **`systemctl --user`**
+service or a **system** service and installs the manager in the matching scope,
+so the drift-guard can actually restart the gateway.
 
 ```bash
-sudo ./install.sh
-# override detection if needed:
-#   sudo GATEWAY_SERVICE=hermes-gateway.service HERMES_USER=you PATCH_SRC=~/hermes-claude-auth/anthropic_billing_bypass.py ./install.sh
+# per-user gateway (systemctl --user hermes-gateway) — the common desktop/build case:
+PATCH_SRC=~/hermes-claude-auth/anthropic_billing_bypass.py ./install.sh
+#   -> deploys to ~/.local/share/hermes-patch-manager, units under
+#      ~/.config/systemd/user, enables linger for boot persistence.
+
+# system gateway (root):
+sudo PATCH_SRC=~/hermes-claude-auth/anthropic_billing_bypass.py ./install.sh
+#   -> deploys to /opt/hermes-patch-manager, units under /etc/systemd/system.
 ```
 
-It deploys to `/opt/hermes-patch-manager`, symlinks `hpm` into `/usr/local/bin`,
-writes `config.json`, installs the gateway drop-in + three units
-(`hermes-patch-health.service`, `hermes-patch-guard.service/.timer`), restarts
-the gateway, and prints `hpm doctor`.
+Force a scope with `MODE=user` / `MODE=system`. It writes `config.json`, installs
+the gateway drop-in + three units (`hermes-patch-health.service`,
+`hermes-patch-guard.service/.timer`), restarts the gateway, and prints
+`hpm doctor`. Add the bin dir (`~/.local/bin` in user mode) to your `PATH`.
 
 ## Usage
 

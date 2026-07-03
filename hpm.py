@@ -35,9 +35,22 @@ REGISTRY_DIR = os.path.join(BASE, "registry.d")
 CONFIG_PATH = os.environ.get("HPM_CONFIG", os.path.join(BASE, "config.json"))
 
 
+def is_user_mode(cfg: dict) -> bool:
+    return (cfg.get("mode") or "system") == "user"
+
+
+def sctl(cfg: dict):
+    """systemctl base command for this deployment's scope."""
+    return ["systemctl", "--user"] if is_user_mode(cfg) else ["systemctl"]
+
+
 def dropin_path(cfg: dict) -> str:
     svc = cfg.get("gateway_service") or "hermes-gateway.service"
-    return f"/etc/systemd/system/{svc}.d/10-hermes-patch-manager.conf"
+    if is_user_mode(cfg):
+        base = os.path.expanduser("~/.config/systemd/user")
+    else:
+        base = "/etc/systemd/system"
+    return os.path.join(base, f"{svc}.d", "10-hermes-patch-manager.conf")
 
 
 # --------------------------------------------------------------------------- config
@@ -194,7 +207,7 @@ def cmd_add(args, cfg):
         manifest["source"] = args.source
     json.dump(manifest, open(os.path.join(REGISTRY_DIR, name + ".json"), "w", encoding="utf-8"), indent=2)
     print(f"registered '{name}' (module {module}.py). Restart the gateway to apply:")
-    print(f"  systemctl restart {cfg.get('gateway_service')}")
+    print(f"  {' '.join(sctl(cfg))} restart {cfg.get('gateway_service')}")
     return 0
 
 
@@ -247,7 +260,7 @@ def cmd_heal(args, cfg):
         print("healthy — nothing to heal")
     else:
         print(f"unhealthy: drift={st['drift']} dropin={st['gateway_dropin_present']} pythonpath={st['pythonpath_wired']}")
-        print(f"  recover with: systemctl restart {cfg.get('gateway_service')}  (or re-run install.sh)")
+        print(f"  recover with: {' '.join(sctl(cfg))} restart {cfg.get('gateway_service')}  (or re-run install.sh)")
     return 0 if st["healthy"] else 1
 
 
@@ -284,13 +297,13 @@ def cmd_guard(args, cfg):
         return 1
     svc = cfg.get("gateway_service", "hermes-gateway.service")
     try:
-        active = subprocess.run(["systemctl", "is-active", "--quiet", svc]).returncode == 0
+        active = subprocess.run(sctl(cfg) + ["is-active", "--quiet", svc]).returncode == 0
     except Exception as exc:
         print(f"guard: cannot query {svc}: {exc}"); return 1
     if not active:
         print(f"guard: {svc} not active; skipping restart"); return 1
     print(f"guard: restarting {svc} to reattach patches...")
-    rc = subprocess.run(["systemctl", "restart", svc]).returncode
+    rc = subprocess.run(sctl(cfg) + ["restart", svc]).returncode
     if rc != 0:
         print(f"guard: restart failed rc={rc}"); return 1
     after = collect_status(cfg)
