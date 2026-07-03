@@ -83,12 +83,39 @@ def _patch_path(mod: Dict[str, Any], comp: Dict[str, Any]) -> str:
     return os.path.join(mod["_dir"], comp["patch"])
 
 
+def _pin_applied(mod, repo) -> bool:
+    """True if a pinned LLM merge exists for the CURRENT upstream commit and the
+    tree files match it — i.e. the mod is realized via an accepted merge rather
+    than a clean patch application."""
+    pin = os.path.join(mod["_dir"], "pinned")
+    upf = os.path.join(pin, "upstream.txt")
+    if not os.path.isfile(upf):
+        return False
+    if open(upf, encoding="utf-8").read().strip() != git(repo, "rev-parse", "HEAD").stdout.strip():
+        return False
+    matched_any = False
+    for root, _dirs, fnames in os.walk(pin):
+        for fn in fnames:
+            fp = os.path.join(root, fn)
+            rel = os.path.relpath(fp, pin).replace(os.sep, "/")
+            if rel == "upstream.txt":
+                continue
+            tgt = os.path.join(repo, rel)
+            if not os.path.isfile(tgt):
+                return False
+            if open(tgt, encoding="utf-8").read() != open(fp, encoding="utf-8").read():
+                return False
+            matched_any = True
+    return matched_any
+
+
 def _sp_is_applied(comp, mod, repo) -> bool:
     patch = _patch_path(mod, comp)
-    if not os.path.isfile(patch):
-        return False
-    # already applied  <=>  reverse-apply would succeed
-    return git(repo, "apply", "--reverse", "--check", patch).returncode == 0
+    # 1. clean application: reverse-apply would succeed
+    if os.path.isfile(patch) and git(repo, "apply", "--reverse", "--check", patch).returncode == 0:
+        return True
+    # 2. realized via an accepted LLM merge pinned to the current upstream
+    return _pin_applied(mod, repo)
 
 
 def _sp_apply(comp, mod, repo, merger) -> Dict[str, Any]:
