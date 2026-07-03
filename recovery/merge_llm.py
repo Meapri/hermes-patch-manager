@@ -27,13 +27,39 @@ import subprocess
 import tempfile
 
 MERGE_SYSTEM = (
-    "You are a precise source-code merge tool. You are given a PATCH that encodes "
-    "an intended change and the CURRENT version of a file the patch no longer "
-    "applies to cleanly because upstream changed. Re-apply the patch's INTENT to "
-    "the current file. Output ONLY the complete updated file content — no prose, "
-    "no markdown fences. Preserve everything else byte-for-byte; make the smallest "
-    "change that realizes the patch's intent."
+    "You adapt an intended code change to a file whose surrounding code changed "
+    "upstream, so the original patch no longer applies. You are given the PATCH "
+    "(a unified diff of the intended change) and the CURRENT file. Emit the change "
+    "as one or more SEARCH/REPLACE edits and NOTHING else, in exactly this format:\n"
+    "<<<<<<< SEARCH\n"
+    "<exact consecutive lines that currently exist in the file>\n"
+    "=======\n"
+    "<the replacement lines>\n"
+    ">>>>>>> REPLACE\n"
+    "Rules: each SEARCH block must match the CURRENT file EXACTLY (byte-for-byte, "
+    "including indentation) and be UNIQUE. Make the smallest edits that realize the "
+    "patch's intent, preserving unrelated upstream changes. Never output the whole "
+    "file. No prose, no markdown fences, no commentary."
 )
+
+_SR_RE = re.compile(r"<<<<<<< SEARCH\n(.*?)\n=======\n(.*?)\n>>>>>>> REPLACE", re.DOTALL)
+
+
+def _parse_sr(text):
+    return [(m.group(1), m.group(2)) for m in _SR_RE.finditer(text)]
+
+
+def _apply_sr(content, blocks):
+    """Apply SEARCH/REPLACE edits by exact, unique string match. Any block that
+    does not match exactly once aborts the whole merge (safety)."""
+    for search, replace in blocks:
+        n = content.count(search)
+        if n == 0:
+            return None, f"SEARCH not found: {search[:70]!r}"
+        if n > 1:
+            return None, f"SEARCH not unique ({n}x): {search[:70]!r}"
+        content = content.replace(search, replace, 1)
+    return content, None
 
 
 def make_merger(cfg: dict):
@@ -179,20 +205,20 @@ def merge_source_patch(cfg, comp, mod, repo) -> dict:
 
     merged = {}
     for path in files:
-        theirs = _show(repo, "HEAD", path)
-        if theirs is None:
-            fp = os.path.join(repo, path)
-            theirs = open(fp, encoding="utf-8").read() if os.path.isfile(fp) else ""
-        base_content = _show(repo, base, path) or ""
+        fp = os.path.join(repo, path)
+        theirs = open(fp, encoding="utf-8").read() if os.path.isfile(fp) else (_show(repo, "HEAD", path) or "")
         prompt = (
             f"# PATCH (intended change, written against base {base[:8]}):\n{patch_text}\n\n"
-            f"# CURRENT FILE `{path}` (upstream changed; patch no longer applies):\n{theirs}\n\n"
-            f"# Base version the patch was written against (reference):\n{base_content}\n\n"
-            "Output the COMPLETE updated content of the current file with the patch's intent applied."
+            f"# CURRENT FILE `{path}`:\n{theirs}\n\n"
+            "Emit SEARCH/REPLACE edits that apply the patch's intent to the CURRENT file."
         )
-        content = _strip_fences(_call_llm(cfg, MERGE_SYSTEM, prompt))
-        if not content.strip():
-            return {"ok": False, "method": "llm", "detail": f"empty merge for {path}"}
+        out = _call_llm(cfg, MERGE_SYSTEM, prompt)
+        blocks = _parse_sr(out)
+        if not blocks:
+            return {"ok": False, "method": "llm", "detail": f"no SEARCH/REPLACE edits parsed for {path}"}
+        content, err = _apply_sr(theirs, blocks)
+        if err:
+            return {"ok": False, "method": "llm", "detail": f"edit apply failed {path}: {err}"}
         ok, det = _verify_syntax(cfg, content, path)
         if not ok:
             return {"ok": False, "method": "llm", "detail": f"syntax check failed {path}: {det}"}
