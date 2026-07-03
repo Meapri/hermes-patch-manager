@@ -1,5 +1,5 @@
 config.json
-patches/*.py
-!patches/.gitkeep
+mods.d/*
+!mods.d/.gitkeep
 __pycache__/
 *.pyc

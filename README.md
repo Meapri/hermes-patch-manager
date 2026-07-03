@@ -1,121 +1,95 @@
-# hermes-patch-manager
+# hermes-recovery
 
-A small subsystem that keeps **multiple runtime patches** attached to Hermes and
-**self-verifying**, on Ubuntu + systemd, reportable over a Tailscale network.
+An **independent, extensible recovery system for Hermes core modifications.**
+`hermes update` does a `git reset` + venv rebuild, which wipes any direct edits
+to the `~/.hermes/hermes-agent` tree. This system re-applies them automatically,
+without depending on Hermes to be working.
 
-## The core idea
+## Model
 
-`hermes update` rebuilds the venv, which wipes anything installed into the venv's
-`site-packages` (the classic `sitecustomize.py` hook). So this manager **never
-puts the hook in the venv**. Instead:
+A **mod** is a declarative, self-verifying unit of change, stored outside Hermes
+under `mods.d/<id>/`:
 
-- The loader (`loader/sitecustomize.py`) lives in `/opt/hermes-patch-manager`.
-- The gateway systemd unit gets a drop-in that sets
-  `Environment=PYTHONPATH=/opt/hermes-patch-manager/loader`.
-- Python auto-imports `sitecustomize` from `PYTHONPATH` at interpreter startup.
-
-Because the loader is outside the venv, **a venv rebuild cannot wipe it** — the
-patches simply reattach on the next gateway start. There is nothing to "recover".
-
-The loader reads every manifest in `registry.d/*.json` and installs one import
-hook per patch, so any number of patches coexist under a single loader.
-
-## Recovery layers (belt & suspenders)
-
-| Layer | Handles |
-|-------|---------|
-| PYTHONPATH-injected loader (outside venv) | `hermes update` / venv rebuild — the main threat, fully immunized |
-| gateway `ExecStartPre=-hpm heal` | logs state before every start; never blocks startup |
-| `hermes-patch-guard.timer` → `hpm guard` | a *running* gateway whose patch drifted (e.g. update didn't restart it): restarts it to reattach (if `auto_restart_on_drift`) |
-| `hpm check` / health endpoint | **interface drift** — a Hermes update that changed a hooked API. This can't be auto-fixed (the patch code must be updated), but it is **detected** and surfaced over the tailnet |
-
-## Install (on the Ubuntu box)
-
-`install.sh` auto-detects whether the Hermes gateway is a **`systemctl --user`**
-service or a **system** service and installs the manager in the matching scope,
-so the drift-guard can actually restart the gateway.
-
-```bash
-# per-user gateway (systemctl --user hermes-gateway) — the common desktop/build case:
-PATCH_SRC=~/hermes-claude-auth/anthropic_billing_bypass.py ./install.sh
-#   -> deploys to ~/.local/share/hermes-patch-manager, units under
-#      ~/.config/systemd/user, enables linger for boot persistence.
-
-# system gateway (root):
-sudo PATCH_SRC=~/hermes-claude-auth/anthropic_billing_bypass.py ./install.sh
-#   -> deploys to /opt/hermes-patch-manager, units under /etc/systemd/system.
+```
+mods.d/claude-auth/
+  mod.json                       # manifest
+  tracked.patch                  # source-patch component (a git diff)
+  files/agent/anthropic_billing_bypass.py   # new-file component
 ```
 
-Force a scope with `MODE=user` / `MODE=system`. It writes `config.json`, installs
-the gateway drop-in + three units (`hermes-patch-health.service`,
-`hermes-patch-guard.service/.timer`), restarts the gateway, and prints
-`hpm doctor`. Add the bin dir (`~/.local/bin` in user mode) to your `PATH`.
+The engine is **handler-based**, so new component types slot in without touching
+orchestration. Today: `source-patch` (a git diff) and `new-file`. Each mod
+carries a `policy` (`apply: auto|manual`, `merge: git|llm`) and a `verify` spec.
 
-## Usage
+## How recovery works
 
-```bash
-hpm doctor            # human summary: loader / drop-in / per-patch runtime state
-hpm check             # verify every enabled patch is APPLIED at runtime; exit!=0 on drift
-hpm status            # full JSON (what the health endpoint serves)
-hpm list              # registered patches
-```
+`hpm heal` applies every enabled mod idempotently, with escalation:
 
-`check`/`status` don't just check files exist — they launch the venv python
-under the loader, import each hooked module, and assert the patch's marker. That
-proves the patch is **actually applied at runtime**, which is the only thing that
-matters for billing/behavior.
+1. `git apply --check` → clean apply
+2. `git apply --3way` → merge against blobs still in the object store
+3. **LLM merge** (optional, Phase 2) → adapt the patch to changed upstream code
+   via an embedded, adapted Antigravity client, then verify before applying
 
-## Adding another patch
+Already-applied mods are detected (`git apply --reverse --check`) and skipped.
+After anything changes, the configured services are restarted so a running
+gateway reloads the re-applied source.
 
-Drop your patch module anywhere, then:
+## Triggers (independent of Hermes)
 
-```bash
-sudo hpm add /path/my_patch.py \
-  --name my-patch \
-  --hook agent.some_module:apply_my_patch \
-  --hook agent.other_module:install_hook \
-  --verify agent.some_module:_MY_PATCH_APPLIED \
-  --source https://github.com/you/my-patch
-sudo systemctl restart hermes-gateway.service
-hpm check
-```
+`hermes update` uses `git reset`, which fires **no git hook**, so recovery is
+driven out-of-band by systemd:
 
-- `--hook target:func` — when `target` is imported, call `my_patch.func` (it is
-  passed the imported module; a zero-arg function also works).
-- `--verify import:MARKER` — `check`/health assert `getattr(import, MARKER)` is
-  truthy after the target loads.
+- `hermes-recovery-watch.path` watches `.git/logs/HEAD` (the reflog — appended on
+  every ref move, unlike `.git/HEAD`) → runs `hpm heal` after a settle delay.
+- `hermes-recovery-guard.timer` re-checks periodically (backstop).
+- `hermes-recovery-health.service` serves status on the tailnet.
 
-Disable/remove: `hpm remove my-patch` (`--purge` to delete the manifest).
+## Install (Ubuntu)
 
-## Tailnet health endpoint
-
-`hermes-patch-health.service` runs `hpm serve`, binding to your Tailscale IP
-(`tailscale ip -4`, override with `health_bind`) on port `8577`:
+Auto-detects a `systemctl --user` gateway (common) vs a system service:
 
 ```bash
-# from any node on the tailnet:
-curl http://<tailscale-ip>:8577/health     # full JSON status
-curl -f http://<tailscale-ip>:8577/healthz # 200 healthy / 503 drift  (for probes/monitors)
+./install.sh
+hpm doctor
 ```
 
-It binds to the tailnet interface only, so it is not exposed to the public
-internet.
+Deploys to `~/.local/share/hermes-recovery` (user) or `/opt/hermes-recovery`
+(system), installs the systemd units, enables linger for boot persistence.
 
-## What survives `hermes update`
+## Register a modification
 
-| Component | Location | Survives update? |
-|-----------|----------|:---:|
-| loader + patches + registry | `/opt/hermes-patch-manager` | ✅ outside venv |
-| gateway drop-in (PYTHONPATH) | `/etc/systemd/system/<svc>.d/` | ✅ outside venv |
-| the venv | rebuilt by `hermes update` | patches reattach on next start |
+Make your edits to the Hermes core, then capture them as a mod:
+
+```bash
+# claude-auth: an edited file + a new module
+hpm capture claude-auth \
+  --files agent/anthropic_adapter.py \
+  --new-files agent/anthropic_billing_bypass.py
+
+# your other edits as a separate mod
+hpm capture web-tools --files tools/web_tools.py,tests/tools/test_web_tools_config.py
+```
+
+## Operate
+
+```bash
+hpm list            # mods + applied state
+hpm check [--json]  # verify every mod is applied at runtime; exit!=0 on drift
+hpm heal            # re-apply now (what the watcher/timer run)
+hpm doctor          # human summary
+```
+
+Health from any tailnet node:
+
+```bash
+curl http://<tailscale-ip>:8577/health     # full JSON
+curl -f http://<tailscale-ip>:8577/healthz # 200 / 503
+```
 
 ## Honest limitations
 
-- **Interface drift is detected, not auto-fixed.** If a Hermes update renames or
-  re-signatures a hooked API, the patch stops applying. `hpm check` and the
-  health endpoint go red so you know immediately — but the patch code itself must
-  be updated. No system can paper over that.
-- The guard's `auto_restart_on_drift` restarts the gateway to heal stale-process
-  drift; set it to `false` in `config.json` if you never want automatic restarts.
-- `install.sh`/systemd/tailscale are Linux-only. The loader and `hpm` logic are
-  plain Python and are smoke-tested cross-platform.
+- **Upstream conflicts**: if `origin/main` changes the lines a patch touches,
+  `git apply` + `--3way` fail. Without the LLM tier this is *detected* (health
+  goes red) but not auto-fixed; with it, the patch is adapted and **verified**
+  before applying — never blindly.
+- Prefer capturing each logical change as its own mod so conflicts stay isolated.

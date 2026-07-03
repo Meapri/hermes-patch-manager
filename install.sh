@@ -1,99 +1,75 @@
 #!/usr/bin/env bash
-# hermes-patch-manager installer (Ubuntu / systemd).
+# hermes modification-recovery installer.
 #
-# Auto-detects whether the Hermes gateway is a SYSTEM service (root, units under
-# /etc/systemd/system) or a `systemctl --user` service (per-user units), and
-# installs the manager in the matching scope so the drift-guard can actually
-# restart the gateway.
+# Deploys the recovery engine outside Hermes and wires systemd (user scope, to
+# match a `systemctl --user` gateway) so mods are re-applied after `hermes
+# update` (git-reset) wipes the core tree.
 #
-#   ./install.sh                 # auto-detect scope
-#   MODE=user ./install.sh       # force per-user scope
-#   MODE=system sudo ./install.sh
-#
-# Env overrides: GATEWAY_SERVICE HERMES_USER HERMES_HOME HERMES_VENV_PYTHON
-#                PATCH_SRC HEALTH_PORT HEALTH_BIND
+#   ./install.sh
+# Env: GATEWAY_SERVICE HERMES_HOME HERMES_VENV_PYTHON HEALTH_PORT HEALTH_BIND MODE
 set -euo pipefail
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GATEWAY_SERVICE="${GATEWAY_SERVICE:-hermes-gateway.service}"
 HEALTH_PORT="${HEALTH_PORT:-8577}"
 HEALTH_BIND="${HEALTH_BIND:-auto}"
 
-# --- detect scope (user vs system) ------------------------------------------
 MODE="${MODE:-}"
 if [ -z "$MODE" ]; then
   if systemctl --user cat "$GATEWAY_SERVICE" >/dev/null 2>&1; then MODE=user
   elif systemctl cat "$GATEWAY_SERVICE" >/dev/null 2>&1; then MODE=system
-  else echo "[X] $GATEWAY_SERVICE not found as a --user or system unit; set GATEWAY_SERVICE/MODE"; exit 1; fi
+  else echo "[X] $GATEWAY_SERVICE not found; set GATEWAY_SERVICE/MODE"; exit 1; fi
 fi
-echo "scope: $MODE   gateway: $GATEWAY_SERVICE"
 
 if [ "$MODE" = system ]; then
-  [ "$(id -u)" -eq 0 ] || { echo "[X] system mode needs root: sudo ./install.sh"; exit 1; }
-  DEST=/opt/hermes-patch-manager;  BIN=/usr/local/bin
-  UNIT_DIR=/etc/systemd/system;    SCTL=(systemctl);          WANTED=multi-user.target
-  HERMES_USER="${HERMES_USER:-$(systemctl show -p User --value "$GATEWAY_SERVICE" 2>/dev/null || true)}"
-  if [ -z "$HERMES_USER" ]; then shopt -s nullglob; h=(/home/*/.hermes); [ "${#h[@]}" -eq 1 ] && HERMES_USER="$(stat -c %U "${h[0]}")"; fi
-  [ -n "$HERMES_USER" ] || { echo "[X] set HERMES_USER"; exit 1; }
-  USER_HOME="$(getent passwd "$HERMES_USER" | cut -d: -f6)"
+  [ "$(id -u)" -eq 0 ] || { echo "[X] system mode needs root"; exit 1; }
+  DEST=/opt/hermes-recovery; BIN=/usr/local/bin; UNIT_DIR=/etc/systemd/system
+  SCTL=(systemctl); WANTED=multi-user.target
+  HERMES_HOME="${HERMES_HOME:-$(getent passwd "$(systemctl show -p User --value "$GATEWAY_SERVICE")" | cut -d: -f6)/.hermes}"
 else
-  DEST="$HOME/.local/share/hermes-patch-manager";  BIN="$HOME/.local/bin"
-  UNIT_DIR="$HOME/.config/systemd/user";           SCTL=(systemctl --user);   WANTED=default.target
-  HERMES_USER="$USER";  USER_HOME="$HOME"
+  DEST="$HOME/.local/share/hermes-recovery"; BIN="$HOME/.local/bin"; UNIT_DIR="$HOME/.config/systemd/user"
+  SCTL=(systemctl --user); WANTED=default.target
+  HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
 fi
 
-HERMES_HOME="${HERMES_HOME:-$USER_HOME/.hermes}"
 AGENT_DIR="$HERMES_HOME/hermes-agent"
-VENV_PYTHON="${HERMES_VENV_PYTHON:-}"
-[ -n "$VENV_PYTHON" ] || for c in "$AGENT_DIR/venv/bin/python" "$AGENT_DIR/.venv/bin/python"; do [ -x "$c" ] && VENV_PYTHON="$c" && break; done
-[ -x "${VENV_PYTHON:-/nonexistent}" ] || { echo "[X] venv python not found under $AGENT_DIR; set HERMES_VENV_PYTHON"; exit 1; }
-echo "user=$HERMES_USER home=$HERMES_HOME venv=$VENV_PYTHON dest=$DEST"
+GITDIR="$AGENT_DIR/.git"
+VENV_PYTHON="${HERMES_VENV_PYTHON:-$AGENT_DIR/venv/bin/python}"
+[ -x "$VENV_PYTHON" ] || { echo "[X] venv python not found: $VENV_PYTHON"; exit 1; }
+[ -d "$GITDIR" ] || { echo "[X] not a git repo: $AGENT_DIR"; exit 1; }
+echo "scope=$MODE agent=$AGENT_DIR venv=$VENV_PYTHON dest=$DEST"
 
-# --- deploy the manager ------------------------------------------------------
-mkdir -p "$DEST/patches" "$BIN" "$UNIT_DIR"
-cp -r "$SRC/loader" "$SRC/registry.d" "$SRC/hpm.py" "$DEST/"
+# --- deploy code (preserve mods.d + config) ---------------------------------
+mkdir -p "$DEST/mods.d" "$BIN" "$UNIT_DIR"
+cp -r "$SRC/hpm.py" "$SRC/recovery" "$DEST/"
 chmod +x "$DEST/hpm.py"
 ln -sf "$DEST/hpm.py" "$BIN/hpm"
 
-for c in "${PATCH_SRC:-}" "$SRC/patches/anthropic_billing_bypass.py" \
-         "$SRC/../hermes-claude-auth/anthropic_billing_bypass.py" \
-         "$HERMES_HOME/patches/anthropic_billing_bypass.py"; do
-  if [ -n "$c" ] && [ -f "$c" ]; then cp "$c" "$DEST/patches/anthropic_billing_bypass.py"; echo "  seeded claude-auth <- $c"; break; fi
-done
-[ -f "$DEST/patches/anthropic_billing_bypass.py" ] || echo "  [!] claude-auth module not seeded; register later with 'hpm add ...'"
-
-# --- config ------------------------------------------------------------------
+# --- config (only write if absent, to preserve edits) -----------------------
+if [ ! -f "$DEST/config.json" ]; then
 cat > "$DEST/config.json" <<JSON
 {
-  "mode": "$MODE",
   "hermes_agent_dir": "$AGENT_DIR",
   "venv_python": "$VENV_PYTHON",
-  "home": "$USER_HOME",
-  "run_as_user": "",
-  "gateway_service": "$GATEWAY_SERVICE",
+  "mods_dir": "$DEST/mods.d",
+  "mode": "$MODE",
+  "restart_services": ["$GATEWAY_SERVICE"],
   "health_bind": "$HEALTH_BIND",
   "health_port": $HEALTH_PORT,
-  "auto_restart_on_drift": true
+  "llm_merge": false
 }
 JSON
+  echo "wrote config.json"
+else
+  echo "kept existing config.json"
+fi
 
-# --- gateway drop-in: PYTHONPATH injection (survives `hermes update`) ---------
-DROPIN_DIR="$UNIT_DIR/${GATEWAY_SERVICE}.d"; mkdir -p "$DROPIN_DIR"
-cat > "$DROPIN_DIR/10-hermes-patch-manager.conf" <<CONF
-# hermes-patch-manager: inject the out-of-venv loader so patches survive
-# \`hermes update\` rebuilding the venv. ExecStartPre '-' never blocks startup.
-[Service]
-Environment=PYTHONPATH=$DEST/loader
-ExecStartPre=-$DEST/hpm.py heal
-CONF
-
-# --- units -------------------------------------------------------------------
-cat > "$UNIT_DIR/hermes-patch-health.service" <<UNIT
+# --- systemd units ----------------------------------------------------------
+cat > "$UNIT_DIR/hermes-recovery-health.service" <<UNIT
 [Unit]
-Description=hermes-patch-manager tailnet health endpoint
+Description=hermes modification-recovery tailnet health endpoint
 After=network-online.target
 Wants=network-online.target
 [Service]
-Type=simple
 ExecStart=$DEST/hpm.py serve
 Restart=always
 RestartSec=5
@@ -101,40 +77,58 @@ RestartSec=5
 WantedBy=$WANTED
 UNIT
 
-cat > "$UNIT_DIR/hermes-patch-guard.service" <<UNIT
+cat > "$UNIT_DIR/hermes-recovery-heal.service" <<UNIT
 [Unit]
-Description=hermes-patch-manager drift guard
+Description=hermes modification-recovery heal (re-apply mods after update)
 [Service]
 Type=oneshot
-ExecStart=$DEST/hpm.py guard
+# Let the git-reset + pip settle before re-applying source patches.
+ExecStartPre=/bin/sleep 15
+ExecStart=$DEST/hpm.py heal
 UNIT
 
-cat > "$UNIT_DIR/hermes-patch-guard.timer" <<UNIT
+cat > "$UNIT_DIR/hermes-recovery-watch.path" <<UNIT
 [Unit]
-Description=hermes-patch-manager drift guard timer
+Description=watch hermes-agent reflog; heal when the tree is updated/reset
+[Path]
+# reflog is appended on every ref move (reset/pull/checkout) — reliable signal
+# that \`hermes update\` touched the tree (unlike .git/HEAD, unchanged by reset).
+PathModified=$GITDIR/logs/HEAD
+Unit=hermes-recovery-heal.service
+[Install]
+WantedBy=$WANTED
+UNIT
+
+cat > "$UNIT_DIR/hermes-recovery-guard.service" <<UNIT
+[Unit]
+Description=hermes modification-recovery periodic guard
+[Service]
+Type=oneshot
+ExecStart=$DEST/hpm.py heal
+UNIT
+
+cat > "$UNIT_DIR/hermes-recovery-guard.timer" <<UNIT
+[Unit]
+Description=hermes modification-recovery guard timer (backstop)
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=10min
-AccuracySec=30s
+OnBootSec=3min
+OnUnitActiveSec=15min
 Persistent=true
 [Install]
 WantedBy=timers.target
 UNIT
 
-# --- activate ----------------------------------------------------------------
+# --- activate ---------------------------------------------------------------
 "${SCTL[@]}" daemon-reload
-"${SCTL[@]}" enable --now hermes-patch-health.service
-"${SCTL[@]}" enable --now hermes-patch-guard.timer
-echo "Restarting $GATEWAY_SERVICE to attach patches..."
-"${SCTL[@]}" restart "$GATEWAY_SERVICE" || echo "  [!] restart $GATEWAY_SERVICE manually"
+"${SCTL[@]}" enable --now hermes-recovery-health.service
+"${SCTL[@]}" enable --now hermes-recovery-watch.path
+"${SCTL[@]}" enable --now hermes-recovery-guard.timer
 
-if [ "$MODE" = user ]; then
-  # let user services run at boot without an active login (headless server)
-  if command -v loginctl >/dev/null && ! loginctl show-user "$USER" -p Linger --value 2>/dev/null | grep -q yes; then
-    sudo loginctl enable-linger "$USER" 2>/dev/null && echo "enabled linger for $USER" || echo "  [!] run: sudo loginctl enable-linger $USER  (for boot persistence)"
-  fi
+if [ "$MODE" = user ] && command -v loginctl >/dev/null; then
+  loginctl show-user "$USER" -p Linger --value 2>/dev/null | grep -q yes \
+    || sudo loginctl enable-linger "$USER" 2>/dev/null || echo "  [!] run: sudo loginctl enable-linger $USER"
 fi
 
 echo; "$DEST/hpm.py" doctor || true
-echo; echo "hpm on PATH? -> $BIN/hpm  (add $BIN to PATH if needed)"
-echo "health: ${SCTL[*]} status hermes-patch-health.service"
+echo; echo "watch: ${SCTL[*]} status hermes-recovery-watch.path"
+echo "register a mod:  hpm capture <id> --files a,b --new-files c"
