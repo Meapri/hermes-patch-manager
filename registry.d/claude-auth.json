@@ -1,0 +1,12 @@
+{
+  "name": "claude-auth",
+  "description": "Claude Code OAuth billing bypass (hermes-claude-auth). Routes OAuth requests to the Max/Pro subscription lane instead of extra-usage.",
+  "module": "anthropic_billing_bypass",
+  "source": "https://github.com/Meapri/hermes-claude-auth",
+  "hooks": [
+    { "target": "agent.error_classifier", "apply": "_install_thinking_replay_classifier_patch" },
+    { "target": "agent.anthropic_adapter", "apply": "apply_patches" }
+  ],
+  "verify": { "import": "agent.anthropic_adapter", "marker": "_CLAUDE_CODE_BYPASS_APPLIED" },
+  "enabled": true
+}

@@ -1,0 +1,10 @@
+[Unit]
+Description=hermes-patch-manager drift guard (verify patches are applied at runtime)
+
+[Service]
+Type=oneshot
+# `hpm guard` verifies every enabled patch is actually applied at runtime and,
+# if auto_restart_on_drift is true in config.json, restarts the gateway to
+# self-heal (e.g. after a `hermes update` that did not restart it). Exit code is
+# advisory; the timer keeps running regardless.
+ExecStart=/opt/hermes-patch-manager/hpm guard

@@ -1,0 +1,18 @@
+[Unit]
+Description=hermes-patch-manager tailnet health endpoint
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/hermes-patch-manager/hpm serve
+Restart=always
+RestartSec=5
+# Hardening — read-only except nothing it needs to write.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
