@@ -28,6 +28,7 @@ import sys
 BASE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, BASE)
 from recovery import engine  # noqa: E402
+from recovery import integrations  # noqa: E402
 
 CONFIG_PATH = os.environ.get("HPM_CONFIG", os.path.join(BASE, "config.json"))
 
@@ -35,6 +36,7 @@ CONFIG_PATH = os.environ.get("HPM_CONFIG", os.path.join(BASE, "config.json"))
 def load_config() -> dict:
     cfg = {
         "hermes_agent_dir": "",
+        "hermes_home": os.path.expanduser("~/.hermes"),
         "venv_python": "",
         "mods_dir": os.path.join(BASE, "mods.d"),
         "mode": "user",                       # user | system  (systemctl scope)
@@ -50,6 +52,9 @@ def load_config() -> dict:
         except Exception as exc:
             sys.stderr.write(f"[hpm] config unreadable: {exc}\n")
     cfg["mods_dir"] = cfg.get("mods_dir") or os.path.join(BASE, "mods.d")
+    cfg["hermes_home"] = os.path.expanduser(cfg.get("hermes_home") or os.path.join(os.path.expanduser("~"), ".hermes"))
+    cfg["hermes_agent_dir"] = cfg.get("hermes_agent_dir") or os.path.join(cfg["hermes_home"], "hermes-agent")
+    cfg["venv_python"] = cfg.get("venv_python") or os.path.join(cfg["hermes_agent_dir"], "venv", "bin", "python")
     return cfg
 
 
@@ -91,6 +96,7 @@ def cmd_heal(args, cfg):
     merger = _load_merger(cfg)
     before = engine.check(cfg)
     res = engine.heal(cfg, merger=merger)
+    integration = integrations.heal(cfg)
     changed = any(
         r.get("method") not in (None, "noop") and r.get("ok")
         for m in res["mods"] for r in m["results"]
@@ -99,12 +105,16 @@ def cmd_heal(args, cfg):
         for r in m["results"]:
             if r.get("method") not in ("noop",):
                 print(f"  {m['id']}: {r.get('target')} -> {r.get('method')} {'ok' if r['ok'] else 'FAIL: '+r.get('detail','')}")
+    for item in integration["results"]:
+        print(f"  integration {item['name']}: {'ok' if item.get('ok') else 'FAILED'}")
+    changed = changed or any(item.get("ok") for item in integration["results"])
     if changed and not args.no_restart:
         for svc, ok in _restart_services(cfg):
             print(f"  restart {svc}: {'ok' if ok else 'FAILED'}")
     after = engine.check(cfg)
-    print("HEALTHY" if after["healthy"] else f"UNHEALTHY drift={after['drift']}")
-    return 0 if after["healthy"] else 1
+    integration_after = integrations.check(cfg)
+    print("HEALTHY" if after["healthy"] and integration_after["healthy"] else f"UNHEALTHY drift={after['drift']}")
+    return 0 if after["healthy"] and integration_after["healthy"] else 1
 
 
 def cmd_check(args, cfg):
@@ -137,13 +147,15 @@ def cmd_doctor(args, cfg):
         mark = {True: "APPLIED", False: "DRIFT", None: "n/a"}[s.get("applied")]
         print(f"    - {s['id']:20} {mark}")
     print(_llm_line(st))
-    print(f"  OVERALL: {'HEALTHY' if st['healthy'] else 'UNHEALTHY'}")
+    print(f"  OVERALL: {'HEALTHY' if st['healthy'] and st.get('integrations', {}).get('healthy', True) else 'UNHEALTHY'}")
     return 0 if st["healthy"] else 1
 
 
 def _full_status(cfg):
     st = engine.check(cfg)
     st["repo"] = cfg["hermes_agent_dir"]
+    st["integrations"] = integrations.check(cfg)
+    st["healthy"] = st["healthy"] and st["integrations"]["healthy"]
     if cfg.get("llm_merge"):
         try:
             from recovery.merge_llm import probe

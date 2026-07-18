@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Single post-update coordinator owned by hermes-patch-manager.
+set -euo pipefail
+
+HPM_HOME="${HPM_HOME:-$HOME/.local/share/hermes-recovery}"
+if [ -x "$HPM_HOME/hpm.py" ]; then
+    exec "$HPM_HOME/hpm.py" heal "$@"
+fi
+
+# Fallback for an installation that has not yet deployed HPM.
+HERMES_HOME="${HERMES_HOME:-$HOME/.hermes}"
+AG="$HOME/hermes-google-antigravity-plugin/scripts/install.sh"
+CL="$HOME/hermes-claude-auth/install.sh"
+[ -x "$CL" ] && HERMES_PATCH_MANAGER=1 "$CL" --post-update || true
+[ -x "$AG" ] && HERMES_PATCH_MANAGER=1 "$AG" --post-update || true

@@ -40,17 +40,37 @@ echo "scope=$MODE agent=$AGENT_DIR venv=$VENV_PYTHON dest=$DEST"
 
 # --- deploy code (preserve mods.d + config) ---------------------------------
 mkdir -p "$DEST/mods.d" "$BIN" "$UNIT_DIR"
-cp -r "$SRC/hpm.py" "$SRC/recovery" "$DEST/"
+cp -r "$SRC/hpm.py" "$SRC/recovery" "$SRC/scripts" "$DEST/"
 chmod +x "$DEST/hpm.py"
 ln -sf "$DEST/hpm.py" "$BIN/hpm"
+
+# HPM owns the single Git recovery trigger. Provider installers are told not to
+# replace it when they are invoked during a heal.
+GIT_HOOKS_DIR="$AGENT_DIR/.git/hooks"
+if [ -d "$GIT_HOOKS_DIR" ]; then
+  cp "$SRC/scripts/post-merge" "$GIT_HOOKS_DIR/post-merge"
+  chmod +x "$GIT_HOOKS_DIR/post-merge"
+fi
 
 # --- config (only write if absent, to preserve edits) -----------------------
 if [ ! -f "$DEST/config.json" ]; then
 cat > "$DEST/config.json" <<JSON
 {
-  "hermes_agent_dir": "$AGENT_DIR",
+  "hermes_home": "$HERMES_HOME",
   "venv_python": "$VENV_PYTHON",
   "mods_dir": "$DEST/mods.d",
+  "claude_repo": "$HOME/hermes-claude-auth",
+  "antigravity_repo": "$HOME/hermes-google-antigravity-plugin",
+  "require_claude": false,
+  "require_antigravity": false,
+  "antigravity_required_files": [
+    "agent/antigravity_cloudcode.py",
+    "agent/antigravity_cloudcode_config.py",
+    "agent/antigravity_native_adapter.py",
+    "agent/antigravity_oauth.py",
+    "plugins/image_gen/google-antigravity/__init__.py",
+    "plugins/image_gen/google-antigravity/plugin.yaml"
+  ],
   "mode": "$MODE",
   "restart_services": ["$GATEWAY_SERVICE"],
   "health_bind": "$HEALTH_BIND",
